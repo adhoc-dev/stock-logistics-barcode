@@ -5,6 +5,7 @@
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl.html).
 
 from odoo import api, fields, models
+from odoo.fields import Domain
 
 
 class ProductProduct(models.Model):
@@ -14,7 +15,7 @@ class ProductProduct(models.Model):
         comodel_name="product.barcode",
         inverse_name="product_id",
         string="Barcodes",
-        auto_join=True,
+        bypass_search_access=True,
     )
     barcode = fields.Char(
         string="Main barcode",
@@ -54,17 +55,36 @@ class ProductProduct(models.Model):
 
     @api.model
     def _search(self, domain, *args, **kwargs):
-        for sub_domain in list(filter(lambda x: x[0] == "barcode", domain)):
-            domain = self._get_barcode_domain(sub_domain, domain)
+        domain = Domain(domain).map_conditions(self._map_barcode_condition)
         return super()._search(domain, *args, **kwargs)
 
-    def _get_barcode_domain(self, sub_domain, domain):
-        barcode_operator = sub_domain[1]
-        barcode_value = sub_domain[2]
-        domain = [
-            ("barcode_ids.name", barcode_operator, barcode_value)
-            if x[0] == "barcode" and x[2] == barcode_value
-            else x
-            for x in domain
-        ]
+    def _map_barcode_condition(self, condition):
+        """Redirect a condition on ``barcode`` to the product's whole barcode list.
+
+        ``barcode`` only holds the first of ``barcode_ids``, so matching it as
+        such would ignore every other barcode of the product.
+        """
+        if condition.field_expr != "barcode":
+            return condition
+        positive_operator = Domain.NEGATIVE_OPERATORS.get(condition.operator)
+        if positive_operator:
+            # Negate the positive match rather than forwarding the negative
+            # operator: on a one2many the latter matches as soon as *another*
+            # barcode of the product differs from the value.
+            return ~self._get_barcode_domain(positive_operator, condition.value)
+        return self._get_barcode_domain(condition.operator, condition.value)
+
+    def _get_barcode_domain(self, operator, value):
+        """Return the domain on ``barcode_ids`` positively matching ``value``."""
+        if operator == "=":
+            values = [value]
+        elif operator == "in":
+            values = list(value)
+        else:
+            return Domain("barcode_ids.name", operator, value)
+        # A falsy barcode means "no barcode at all", which is a condition on the
+        # one2many itself: a product without lines never matches on their name.
+        domain = Domain("barcode_ids.name", "in", [v for v in values if v])
+        if not all(values):
+            domain |= Domain("barcode_ids", "=", False)
         return domain
